@@ -1,0 +1,572 @@
+---
+title: "JAES_Uncontested_Paper_May2023"
+author: "Robert Nordstrom"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(haven)
+library(readr)
+#library(tidyverse)
+#install.packages("tidyverse")
+library(dplyr)
+library(zoo)
+library(data.table)
+library(lfe)
+library(MASS)
+library(stats)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+library("marginaleffects")
+library("modelsummary")
+#devtools::install_github("sjPlot/devel")
+library(parameters)
+library(sjPlot)
+library(cowplot)
+
+library(plm)
+
+
+
+###almost identical except the intercept is excluded for felm-models, also density has somewhat lower statistical sig. for some reason
+#Why Geographically-Targeted Spending data 
+data_PR_analysis_komblocs13Sep212020 <- read_dta("data_PR_analysis_komblocs13Sep212020.dta")
+
+##replicate analysis from geographically
+#DV newf1logngaid_pc
+data <- data_PR_analysis_komblocs13Sep212020
+data <- data[!duplicated(data[c("muncode_num", "year")]),]
+data <- data %>% filter(split_mun_jed == 0)
+data_2 <- data[,c( "bb","bb_vsharevp_pr","muncode_num", "year")]
+data_2$muncode <- data_2$muncode_num
+
+### uncontested data 
+#mutohyo_data <- read.csv("kengi_mayor_mutohyo_feb28.csv", fileEncoding = "SHIFT-JIS")
+mutohyo_data <- read_csv("kengi_mayor_mutohyo_feb28.csv")
+
+### municipality data
+mun_data <- read_csv("estat_needs_mar10.csv")
+
+### national elections results 
+
+hirei <- read_csv("hirei/hirei_lower_allyears_mar24.csv", locale = locale(encoding = "Shift_JIS"))
+
+### merge and create analysis dataframe p1
+data$muncode <- as.integer(data$muncode_num)
+p1 <- merge(mun_data, mutohyo_data, by = c("year", "muncode"))
+p1 <- merge(p1, data_2, by = c("year","muncode"), all.x = T)
+p1 <- merge(p1, hirei, by = c("year","muncode"), all.x = T)
+
+
+{
+###fill in na for national elections data
+see <-p1 %>% dplyr::select(muncode, year, bb, bb_vsharevp_pr) %>% group_by(muncode) %>% arrange(muncode, year) %>% mutate_all(funs(na.locf(., na.rm = F)))
+
+p1 <- merge(mun_data, mutohyo_data, by = c("year", "muncode"), all.x = T)
+p1 <- merge(p1, see, by = c("year","muncode"), all.x = T)
+p1 <- merge(p1, hirei, by = c("year","muncode"), all.x = T)
+
+colnames(p1)
+### convert to numeric on multiple columns
+vars <- c("tot_pop","pop_u15", "pop_o65", "mun_tot_taxable_income_1k_jpy","tot_working_pop","tot_primary_ind_pop",
+          "bud_elderly_welfare","bud_childcare_welfare","bud_seikatsu_hogo","bud_disaster","bud_eiseihi",                  
+          "bud_hoken_eisei","bud_hokensho", "bud_cleaning","bud_labour","bud_unemployment_measures",    
+          "bud_forestry", "bud_commerce", "bud_dokihi","bud_roads_bridges","bud_city_planning",            
+          "bud_housing","bud_firefighting", "bud_educ","bud_elementary","bud_middle",                   
+          "bud_high", "bud_special_schools","bud_kindergarten", "mun_ntd_1k_jpy",
+          "did_population_estat","total_expenses_estat","bud_gikai", "bud_general",                  
+          "bud_disaster_full","bud_debt", "bud_shakai_fukushi", "bud_saigai_kyuujo",
+          "bud_shitsugyou_taisaku", "bud_shakai_kyouiku", "bud_hoken_taiiku", "tot_taxable_income_1k", "tot_taxable_pop",
+          "tot_area_ha", "jisshu_zaigen")
+p1[,vars] <- lapply(p1[,vars],function(x){as.numeric(gsub(",", "", x))})
+
+# create analysis variables
+## fix total expenditure variable
+p1$mun_total_exp <- as.numeric(gsub(",","",p1$mun_total_exp))
+p1$mun_area_km2 <- as.numeric(gsub(",","",p1$mun_area_km2))
+
+p1$X.x <-NULL
+p1$X.y <-NULL
+p1 <- p1 %>% mutate(ntd_needs_perc = needs_ntd/needs_income,
+                    per_capita_ntd = (needs_ntd*1000)/tot_pop,
+                    pop_o65_perc = (pop_o65/tot_pop)*100,
+                    pop_u15_perc = (pop_u15/tot_pop)*100,
+                    dependables = ((pop_u15+pop_o65)/tot_pop)*100,
+                    primary_ind_perc = (tot_primary_ind_pop/tot_working_pop)*100,
+                    tot_pop_10k = tot_pop/10000,
+                    bb_vsharevp_pr_perc = bb_vsharevp_pr*100,
+                    tot_exp_pc = total_expenses_estat/tot_pop,
+                    
+                    percap_minseihi = (needs_minseihi*1000)/tot_pop,
+                    percap_shakai_fukushi = bud_shakai_fukushi/tot_pop,
+                    percap_elderly =bud_elderly_welfare/tot_pop,
+                    percap_childcare =bud_childcare_welfare/tot_pop,
+                    percap_seikatsu = bud_seikatsu_hogo/tot_pop,
+                    percap_saigai_kyuujo = bud_saigai_kyuujo/tot_pop,
+                    
+                    percap_educ = bud_educ/tot_pop,
+                    perc_did = did_population_estat/tot_pop)
+
+
+
+p1 <- p1 %>% mutate(gikai_pc = bud_gikai/tot_pop,
+                    general_pc = bud_general/tot_pop,
+                    minsei_pc = (needs_minseihi*1000)/tot_pop,
+                    eisei_pc = bud_eiseihi/tot_pop,
+                    labour_pc = bud_labour/tot_pop,
+                    agri_pc = bud_forestry/tot_pop,
+                    commerce_pc = bud_commerce/tot_pop,
+                    build_pc = bud_dokihi/tot_pop,
+                    fire_pc = bud_firefighting/tot_pop,
+                    educ_pc = bud_educ/tot_pop,
+                    disaster_pc = bud_disaster_full/tot_pop,
+                    debt_pc = bud_debt/tot_pop,
+                    
+                    elem_pc = bud_elementary/tot_pop,
+                    middle_pc = bud_middle/ tot_pop,
+                    high_pc = bud_high/tot_pop,
+                    spec_pc = bud_special_schools/tot_pop,
+                    kinder_pc = bud_kindergarten/tot_pop,
+                    shakai_kyouiku_pc =  bud_shakai_kyouiku/tot_pop,
+                    hoken_taiiku_pc =  bud_hoken_taiiku/tot_pop,
+                    income_pc = tot_taxable_income_1k/tot_taxable_pop,
+                    balance_pc = needs_balance/tot_pop,
+                    revenue_pc = needs_income/tot_pop,
+                    unemploy_pc = bud_unemployment_measures/tot_pop,
+                    jisshu_zaigen_pc = jisshu_zaigen/tot_pop,
+                    fiscal_autonomy = jisshu_zaigen/total_expenses_estat
+                    )
+
+
+### enter perc_did on off years (only available during census years)
+p1 <- p1 %>% group_by(muncode) %>% arrange(year) %>% fill(perc_did)
+
+
+### filter uneven years
+p1 <- p1 %>% filter(year > 2008)
+
+
+## remove all where uncontested is na
+#p1 <- p1[!is.na(p1$mutohyo_kengi),]
+p1 <- p1[!is.na(p1$mutohyo_mayor),]
+p1 <- p1[!is.na(p1$mutohyo_city),]
+
+}
+
+library("marginaleffects")
+library("modelsummary")
+
+library(parameters)
+library(sjPlot)
+library(SciViews)
+
+### prepare analysis datarframe
+dups <- duplicated(p1[c("year", "muncode")]  )
+p2 <- subset(p1,!dups)
+p2$perc_did <- ifelse( is.na(p2$perc_did), 0, p2$perc_did )
+
+pdata <- pdata.frame(p2, index=c("muncode", "year"))
+
+### make ln transformations of all important variables
+pdata <- pdata %>% mutate(ln_tot_exp_pc = ln(tot_exp_pc),
+                   ln_revenue_pc = ln(revenue_pc),
+                 ln_balance_pc = ln(balance_pc),
+                 ln_minsei_pc = ln(minsei_pc),
+                 ln_percap_shakai_fukushi = ln(percap_shakai_fukushi),
+                 ln_percap_elderly = ln(percap_elderly),
+                 ln_percap_childcare = ln(percap_childcare),
+                 ln_tot_pop_10k = ln(tot_pop_10k),
+                 ln_income_pc = ln(income_pc),
+                 ln_tot_area_ha = ln(tot_area_ha))
+
+```
+
+```{r table 1 Uncontested by size of city, results = "asis"}
+### table 1 - number of uncontested by size of city
+dups <- duplicated(p1[c("year", "muncode")]  )
+p2 <- subset(p1,!dups)
+p2 <- p2 %>% filter(year > 2008)
+
+pdata <- pdata.frame(p2, index=c("muncode", "year"))
+pdata_2 <- pdata %>% filter(year == 2019)
+pdata_2 <- pdata_2 %>% mutate(city_size = case_when(tot_pop_10k < 5 ~ "Less than 50,000",
+                                         tot_pop_10k <10 & tot_pop_10k >= 5 ~ "50,000 - 100,000",
+                                         tot_pop_10k <20 & tot_pop_10k >= 10 ~ "100,000 - 200,000",
+                                         tot_pop_10k <50 & tot_pop_10k >= 20 ~ "200,000 - 500,000",
+                                         tot_pop_10k >= 50 ~ "More than 500,000"),
+                              elderly_2 = case_when(pop_o65_perc < 20 ~ "Less than 20%",
+                                         pop_o65_perc <25 & pop_o65_perc >= 20 ~ "20 - 25%",
+                                         pop_o65_perc <30 & pop_o65_perc >= 25 ~ "25 - 30%",
+                                         pop_o65_perc <35 & pop_o65_perc >= 30 ~ "30 - 35%",
+                                         pop_o65_perc >= 35 ~ "More than 35%"))
+
+out <- pdata_2 %>% group_by(city_size) %>%
+  summarise("Total municipalities" = n(), 
+            "Uncontested mayoral election" = paste0(sum(mutohyo_mayor), " (",round((sum(mutohyo_mayor)/n())*100, 1), "%)"),
+            "Uncontested assembly election" =  paste0(sum(mutohyo_city), " (",round((sum(mutohyo_city)/n())*100, 1), "%)"),
+            "Mean elderly (65+) elderly_2" = paste0(round(mean(pop_o65_perc),1), "%"))
+out <- pdata_2 %>% group_by(elderly_2) %>%
+  summarise("Total municipalities" = n(), 
+            "Uncontested mayoral election" = paste0(sum(mutohyo_mayor), " (",round((sum(mutohyo_mayor)/n())*100, 1), "%)"),
+            "Uncontested assembly election" =  paste0(sum(mutohyo_city), " (",round((sum(mutohyo_city)/n())*100, 1), "%)"),
+            "Mean municipal population" = paste0(round(mean(tot_pop),1), ""))
+stargazer::stargazer(out, type = "html", summary =F,
+                     out = "C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/regression_models/tab1_apr8.html")
+
+### prepare analysis datarframe (redo for later analyses)
+dups <- duplicated(p1[c("year", "muncode")]  )
+p2 <- subset(p1,!dups)
+p2$perc_did <- ifelse( is.na(p2$perc_did), 0, p2$perc_did )
+
+pdata <- pdata.frame(p2, index=c("muncode", "year"))
+
+### make ln transformations of all important variables
+pdata <- pdata %>% mutate(ln_tot_exp_pc = ln(tot_exp_pc),
+                   ln_revenue_pc = ln(revenue_pc),
+                 ln_balance_pc = ln(balance_pc),
+                 ln_minsei_pc = ln(minsei_pc),
+                 ln_percap_shakai_fukushi = ln(percap_shakai_fukushi),
+                 ln_percap_elderly = ln(percap_elderly),
+                 ln_percap_childcare = ln(percap_childcare),
+                 ln_tot_pop_10k = ln(tot_pop_10k),
+                 ln_income_pc = ln(income_pc),
+                 ln_tot_area_ha = ln(tot_area_ha))
+
+```
+
+
+
+```{r table 2 Descriptive statistics}
+### 1. correlation between ntd and uncontested elections
+data <- pdata %>% dplyr::select(year, mutohyo_mayor, mutohyo_city, pop_o65_perc, merged_mun,tot_pop, income_pc, tot_area_ha, total_expenses_estat, 
+                             totseat_city, primary_ind_perc, perc_did, may_age, may_female, may_incumbent,fiscal_autonomy, zaisei_indicator, ldp_perc)
+data$year <- as.numeric(data$year)
+data$merged_mun <- as.numeric(data$merged_mun)
+data$may_female <- as.numeric(data$may_female)
+
+library(vtable)
+st(data,file='C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/regression_models/descstat_mar24.html')
+
+```
+```{r figure 2}
+pdata <-pdata %>% mutate(unc_class= case_when(mutohyo_mayor == 1 & mutohyo_city == 1 ~ "Both uncontested", 
+                                      mutohyo_mayor == 1 & mutohyo_city == 0 ~ "Mayor uncontested, assembly contested", 
+                                      mutohyo_mayor == 0 & mutohyo_city == 1 ~ "Mayor contested, assembly uncontested", 
+                                      mutohyo_mayor == 0 & mutohyo_city == 0 ~ "Neither uncontested"))
+pdata$unc_class <- factor(pdata$unc_class, ordered = FALSE)
+
+pdata$unc_class <- relevel(pdata$unc_class, ref = "Neither uncontested")
+
+
+d1 <- pdata %>% group_by(year, mutohyo_mayor, mutohyo_city) %>% summarise(obs_main = mean(zaisei_indicator, na.rm = T))
+
+p <-ggplot(d1, aes(x = year, y = obs_main, group = 1)) + 
+  geom_line(data = subset(d1, mutohyo_mayor == 0 & mutohyo_city == 0), size = 2, aes(color = "Both assembly and mayor contested")) + 
+  geom_line(data = subset(d1, mutohyo_mayor == 1 & mutohyo_city == 0), size = 2, aes(color = "Mayor uncontested, assembly contested")) + 
+  geom_line(data = subset(d1, mutohyo_mayor == 0 & mutohyo_city == 1), size = 2, aes(color = "Mayor contested, assembly uncontested")) + 
+  geom_line(data = subset(d1, mutohyo_mayor == 1 & mutohyo_city == 1), size = 2, aes(color = "Both mayor and assembly uncontested")) +
+  scale_color_manual(name = "", 
+                     values = c("Both assembly and mayor contested" = "red", 
+                                "Mayor uncontested, assembly contested" = "pink", 
+                                "Mayor contested, assembly uncontested" = "red4", 
+                                "Both mayor and assembly uncontested" = "blue")) + 
+  ylab("Fiscal capability index (mean)") + 
+  ylim(0, 1)  # Set the lower limit of the y-axis to 0
+
+ggsave("C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/plots/fig1_apr5.png", p, width=10, height=4, dpi=600)
+p
+```
+
+
+```{r figure 3}
+
+library(extrafont)
+library(ggtext)
+windowsFonts(meiryo = windowsFont("Meiryo UI"))
+windowsFonts(kozkagothic = windowsFont("KozGoPro-ExtraLight"))
+
+
+p <- ggplot(pdata, aes(x = pop_o65_perc, y = zaisei_indicator)) + 
+  geom_point() + 
+  labs(x="Elderly (65+)", y="Fiscal capability", title="")+ 
+  theme(text = element_text(family = "meiryo"))
+
+
+ggsave("C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/plots/fig2_may5.png", p, width=10, height=4, dpi=600)
+p 
+```
+
+```{r table 3, main regression fiscal capability, results = "asis"}
+
+### ZAISEI INDICATOR 
+
+  m1 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor + ln(pop_o65_perc) + merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+           + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov1         <- vcovHC(m1, type = "HC1")
+  robust_1    <- sqrt(diag(cov1))
+  #summary(m1)
+  
+  m2 <-plm(ln(zaisei_indicator) ~ mutohyo_city + ln(pop_o65_perc) + merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+           + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov2         <- vcovHC(m2, type = "HC1")
+  robust_2    <- sqrt(diag(cov2))
+  #summary(m3)
+  
+  m3 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor + mutohyo_city + ln(pop_o65_perc)+merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+           + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov3         <- vcovHC(m3, type = "HC1")
+  robust_3    <- sqrt(diag(cov3))
+  #summary(m3)
+  m4_1 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*mutohyo_city+ln(pop_o65_perc)+merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov4_1         <- vcovHC(m4_1, type = "HC1")
+  robust_4_1    <- sqrt(diag(cov4_1))
+  #summary(m3)
+  
+  m4 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*ln(pop_o65_perc)+merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov4         <- vcovHC(m4, type = "HC1")
+  robust_4    <- sqrt(diag(cov4))
+  #summary(m3)
+  
+  m5 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*ln_tot_pop_10k + ln(pop_o65_perc)+merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov5         <- vcovHC(m5, type = "HC1")
+  robust_5    <- sqrt(diag(cov5))
+  #summary(m3)
+
+  m6 <-plm(ln(zaisei_indicator) ~ mutohyo_city*ln(pop_o65_perc) +ln_tot_pop_10k +merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov6         <- vcovHC(m6, type = "HC1")
+  robust_6    <- sqrt(diag(cov6))
+  #summary(m3)
+
+  m7 <-plm(ln(zaisei_indicator) ~ mutohyo_city*ln_tot_pop_10k + ln(pop_o65_perc)+merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov7         <- vcovHC(m7, type = "HC1")
+  robust_7    <- sqrt(diag(cov7))
+  #summary(m3)
+  
+  m8 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*mutohyo_city*ln(pop_o65_perc)+ln_tot_pop_10k + merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov8         <- vcovHC(m8, type = "HC1")
+  robust_8    <- sqrt(diag(cov8))
+  
+  m9 <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*mutohyo_city*ln_tot_pop_10k + ln(pop_o65_perc)+merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov9         <- vcovHC(m9, type = "HC1")
+  robust_9    <- sqrt(diag(cov9))
+  #summary(m3)
+
+stargazer::stargazer(m1,m2,m3,m4_1,m4,m5,m6,m7,type = "html", omit = c("year", "pref_id"),
+                     se = list(robust_1, robust_2, robust_3, robust_4_1, robust_4, robust_5,robust_6,robust_7),
+                     covariate.labels = c("Uncontested mayor", "Uncontested assembly", "Elderly (65+) % (ln)", "Merger dummy",
+                                          "Total population (ln)", "Income per capita (ln)", "Total area hectare (ln)",
+                                          "Lagged total municipal expenses (ln)", "N.o seats in assembly", "LDP vote share (ln)", "Primary industry % (ln)", "DID % (ln)",
+                                          "Mayor age Dummy", "Mayor female Dummy", "Mayor incumbent Dummy",
+                                          "UncontestedMayor*UncontestedCity", "UncontestedMayor* Elderly (65+) % (ln)",
+                                          "UncontestedMayor* Total population (ln)", "UncontestedAssembly* Elderly (65+) % (ln)",
+                                          "UncontestedAssembly*Total population (ln)"),
+                     out = "C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/regression_models/regmod2_apr7.html")
+
+stargazer::stargazer(m1,m2,m3,m4_1,m4,m5,m6,m7,type = "html", omit = c("year", "pref_id", "merged_mun", "ln_income_pc", 
+                                                                       "ln_tot_area_ha", "lag(ln(total_expenses_estat))",
+                                                                       "totseat_city", "ldp_perc", "primary_ind_perc",
+                                                                       "perc_did", "may_age", "may_female", "may_incumbent",
+                                                                       "total_expenses_estat"),
+                     covariate.labels = c("無投票（市長）", "無投票（議会）", "高齢者の割合　65＋　（ｌｎ）", "人口　（ｌｎ）",
+                                          "無投票（市長）＊無投票（議会）",
+                                          "無投票（市長）＊高齢者の割合　65＋　（ｌｎ）", 
+                                          "無投票（市長）＊人口　（ｌｎ）",
+                                          "無投票（議会）＊高齢者の割合　65＋　（ｌｎ）", 
+                                          "無投票（議会）＊人口　（ｌｎ）"),
+                     se = list(robust_1, robust_2, robust_3, robust_4_1, robust_4, robust_5,robust_6,robust_7),
+                     add.lines = list(c("コントロール変数", "YES", "YES", "YES", "YES", "YES", "YES", "YES", "YES")),
+                     out = "C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/regression_models/regmod2_abbreviated_may2.html")
+
+
+```
+
+```{r figure 1 - conditional effect mayorXelderly, results = "asis"}
+
+pdata <- pdata %>% mutate(elderly = pop_o65_perc>mean(pop_o65_perc))
+mean_eld <- mean(pdata$pop_o65_perc)
+
+mod <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*pop_o65_perc+merged_mun + ln_tot_pop_10k+ ln_income_pc
+          + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1)+ may_age + may_female + may_incumbent, 
+         data = pdata, model = "pooling", index = c("muncode", "year"))
+cov         <- vcovHC(mod, type = "HC1")
+
+### create df for the density plot
+your_data_frame <- data.frame(pop_o65_perc = pdata$pop_o65_perc)
+
+p1 <- plot_cme(mod, variables = "mutohyo_mayor",  condition = c( "pop_o65_perc"), vcov = cov) +
+  # Add a horizontal line at y = 0
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  ggtitle("Effect of uncontested mayor")+ 
+    xlab("% elderly population") +
+  geom_density(data = your_data_frame, aes(x = pop_o65_perc), fill = "blue", alpha = 0.25)
+  
+mod <-plm(ln(zaisei_indicator) ~ mutohyo_city*pop_o65_perc+merged_mun + ln_tot_pop_10k+ ln_income_pc
+          + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1)+ may_age + may_female + may_incumbent, 
+          data = pdata, model = "pooling", index = c("muncode", "year"))
+cov         <- vcovHC(mod, type = "HC1")
+p2 <- plot_cme(mod, variables = "mutohyo_city",  condition = c( "pop_o65_perc"), vcov = cov) +
+  # Add a horizontal line at y = 0
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  ggtitle("Effect of uncontested assembly")+ 
+    xlab("% elderly population") +
+  geom_density(data = your_data_frame, aes(x = pop_o65_perc), fill = "blue", alpha = 0.25)
+p <- plot_grid(p1,p2, nrow  = 1)
+ggsave("C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/plots/fig2_may18.png", p, width=10, height=4, dpi=600)
+p
+```
+
+
+```{r figure 2 - conditional effect of cityXpopulation}
+ 
+
+ mod <-plm(ln(zaisei_indicator) ~ mutohyo_mayor*ln_tot_pop_10k+merged_mun +pop_o65_perc + ln_income_pc
+            + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+            + ln(primary_ind_perc+0.1) + ln(perc_did+0.1)+ may_age + may_female + may_incumbent, 
+            data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov         <- vcovHC(mod, type = "HC1")
+
+### create df for the density plot
+your_data_frame <- data.frame(ln_tot_pop_10k = pdata$ln_tot_pop_10k)
+
+    
+  p1 <- plot_cme(mod, variables = "mutohyo_mayor",  condition = c( "ln_tot_pop_10k"), vcov = cov)+
+    scale_x_continuous(labels = function(x) round(exp(x) * 10000, 2)) +
+    # Add a horizontal line at y = 0
+    geom_hline(yintercept = 0, linetype = "dashed") + 
+    ggtitle("Effect of uncontested mayor")+ 
+    xlab("Municipal population")  +
+  geom_density(data = your_data_frame, aes(x = ln_tot_pop_10k), fill = "blue", alpha = 0.25)
+  
+  mod <-plm(ln(zaisei_indicator) ~ mutohyo_city*ln_tot_pop_10k+merged_mun +pop_o65_perc + ln_income_pc
+            + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+            + ln(primary_ind_perc+0.1) + ln(perc_did+0.1)+ may_age + may_female + may_incumbent, 
+            data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov         <- vcovHC(mod, type = "HC1")
+  
+  p2 <- plot_cme(mod, variables = "mutohyo_city",  condition = c( "ln_tot_pop_10k"), vcov = cov)+
+    scale_x_continuous(labels = function(x) round(exp(x) * 10000, 2)) + 
+    # Add a horizontal line at y = 0
+    geom_hline(yintercept = 0, linetype = "dashed") + 
+    ggtitle("Effect of uncontested assembly") + 
+    xlab("Municipal population")  +
+  geom_density(data = your_data_frame, aes(x = ln_tot_pop_10k), fill = "blue", alpha = 0.25)
+p <- plot_grid(p1,p2, nrow  = 1)
+ggsave("C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/plots/fig3_may18.png", p, width=10, height=4, dpi=600)
+p
+
+
+```
+
+```{r table S8, results = "asis"}
+
+### Real public debt service ratio 
+
+  m1 <-plm(mun_debt_annual_budget_perc ~ mutohyo_mayor + ln(pop_o65_perc) + merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+           + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov1         <- vcovHC(m1, type = "HC1")
+  robust_1    <- sqrt(diag(cov1))
+  #summary(m1)
+  
+  m2 <-plm(mun_debt_annual_budget_perc ~ mutohyo_city + ln(pop_o65_perc) + merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+           + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov2         <- vcovHC(m2, type = "HC1")
+  robust_2    <- sqrt(diag(cov2))
+  #summary(m3)
+  
+  m3 <-plm(mun_debt_annual_budget_perc ~ mutohyo_mayor + mutohyo_city + ln(pop_o65_perc)+merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+           + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov3         <- vcovHC(m3, type = "HC1")
+  robust_3    <- sqrt(diag(cov3))
+  #summary(m3)
+  m4_1 <-plm(mun_debt_annual_budget_perc ~ mutohyo_mayor*mutohyo_city+ln(pop_o65_perc)+merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov4_1         <- vcovHC(m4_1, type = "HC1")
+  robust_4_1    <- sqrt(diag(cov4_1))
+  #summary(m3)
+  
+  
+  m4 <-plm(mun_debt_annual_budget_perc ~ mutohyo_mayor*ln(pop_o65_perc)+merged_mun + ln_tot_pop_10k+ ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov4         <- vcovHC(m4, type = "HC1")
+  robust_4    <- sqrt(diag(cov4))
+  #summary(m3)
+  
+  m5 <-plm(mun_debt_annual_budget_perc ~ mutohyo_mayor*ln_tot_pop_10k + ln(pop_o65_perc)+merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov5         <- vcovHC(m5, type = "HC1")
+  robust_5    <- sqrt(diag(cov5))
+  #summary(m3)
+
+  m6 <-plm(mun_debt_annual_budget_perc ~ mutohyo_city*ln(pop_o65_perc) +ln_tot_pop_10k +merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov6         <- vcovHC(m6, type = "HC1")
+  robust_6    <- sqrt(diag(cov6))
+  #summary(m3)
+
+  m7 <-plm(mun_debt_annual_budget_perc ~ mutohyo_city*ln_tot_pop_10k + ln(pop_o65_perc)+merged_mun + ln_income_pc
+           + ln_tot_area_ha + lag(ln(total_expenses_estat))+ totseat_city+ ln(ldp_perc)
+          + ln(primary_ind_perc+0.1) + ln(perc_did+0.1) + may_age + may_female + may_incumbent, 
+           data = pdata, model = "pooling", index = c("muncode", "year"))
+  cov7         <- vcovHC(m7, type = "HC1")
+  robust_7    <- sqrt(diag(cov7))
+  #summary(m3)
+
+stargazer::stargazer(m1,m2,m3,m4_1,m4,m5,m6,m7,type = "html", omit = c("year", "pref_id"),
+                     se = list(robust_1, robust_2, robust_3, robust_4_1, robust_4, robust_5,robust_6,robust_7),
+                     covariate.labels = c("Uncontested mayor", "Uncontested assembly", "Elderly (65+) % (ln)", "Merger dummy",
+                                          "Total population (ln)", "Income per capita (ln)", "Total area hectare (ln)",
+                                          "Lagged total municipal expenses (ln)", "N.o seats in assembly", "LDP vote share (ln)", "Primary   industry % (ln)", "DID % (ln)",
+                                          "Mayor age Dummy", "Mayor female Dummy", "Mayor incumbent Dummy",
+                                          "UncontestedMayor*UncontestedCity", "UncontestedMayor* Elderly (65+) % (ln)",
+                                          "UncontestedMayor* Total population (ln)", "UncontestedAssembly* Elderly (65+) % (ln)",
+                                          "UncontestedAssembly*Total population (ln)"),
+                     out = "C:/Users/robba/Dropbox/uncontested_effect_on_municipalities/regression_models/regmodS8_mar21.html")
+
+```
+
